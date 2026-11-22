@@ -1,56 +1,39 @@
-import { defineConfig } from 'vite';
+import { defineConfig, type ProxyOptions } from 'vite';
 import react from '@vitejs/plugin-react';
 
 /**
- * base: './' keeps asset paths relative so one build works in Electron (file://)
- * and Capacitor (https://localhost).
+ * Dev-only gateway proxies.
  *
- * Dev proxies exist because the free gateways do not all send CORS headers.
- * Desktop builds proxy through the Electron main process; Android requests go
- * out directly and surface a clear error if a provider refuses the origin.
+ * Browser builds call the gateways directly (the providers allow CORS). In
+ * `vite dev` the same calls are routed through these proxies so localhost
+ * origin quirks never get in the way. Routes are matched by the `devBaseUrl`
+ * values in src/agent/routes.ts; the prefix is replaced with the gateway's
+ * real API base path.
  */
+const gateway = (target: string, prefix: string, basePath: string): ProxyOptions => ({
+  target,
+  changeOrigin: true,
+  secure: true,
+  rewrite: (path) => path.replace(new RegExp('^' + prefix), basePath),
+});
+
 export default defineConfig({
-  base: './',
   plugins: [react()],
+  base: './',
   server: {
     port: 5173,
     strictPort: true,
     proxy: {
-      '/gw/kilo': {
-        target: 'https://ai-gateway.kilo.ai',
-        changeOrigin: true,
-        secure: true,
-        rewrite: (p) => p.replace(/^\/gw\/kilo/, '/api/v1'),
-      },
-      '/gw/llm7': {
-        target: 'https://api.llm7.io',
-        changeOrigin: true,
-        secure: true,
-        rewrite: (p) => p.replace(/^\/gw\/llm7/, '/v1'),
-      },
-      '/gw/pollinations': {
-        target: 'https://text.pollinations.ai',
-        changeOrigin: true,
-        secure: true,
-        rewrite: (p) => p.replace(/^\/gw\/pollinations/, '/openai'),
-      },
-      '/gw/ovh': {
-        target: 'https://oai.endpoints.kepler.ai.cloud.ovh.net',
-        changeOrigin: true,
-        secure: true,
-        rewrite: (p) => p.replace(/^\/gw\/ovh/, '/v1'),
-      },
-      '/gw/freeai': {
-        target: 'https://api.free.ai',
-        changeOrigin: true,
-        secure: true,
-        rewrite: (p) => p.replace(/^\/gw\/freeai/, '/v1'),
-      },
+      '/gw/kilo': gateway('https://ai-gateway.kilo.ai', '/gw/kilo', '/api/v1'),
+      '/gw/llm7': gateway('https://api.llm7.io', '/gw/llm7', '/v1'),
+      '/gw/pollinations': gateway('https://text.pollinations.ai', '/gw/pollinations', '/openai'),
+      '/gw/ovh': gateway('https://oai.endpoints.kepler.ai.cloud.ovh.net', '/gw/ovh', '/v1'),
+      '/gw/freeai': gateway('https://api.free.ai', '/gw/freeai', '/v1'),
     },
   },
   build: {
     outDir: 'dist',
     target: 'es2020',
-    chunkSizeWarningLimit: 1200,
+    sourcemap: false,
   },
 });

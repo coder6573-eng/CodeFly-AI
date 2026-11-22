@@ -52,6 +52,7 @@ export interface ChatEntry {
   model?: string;
   route?: string;
   tools?: number;
+  steps?: string[];
   error?: boolean;
   at: number;
 }
@@ -70,8 +71,8 @@ export interface Project {
 export type AgentEvent =
   | { type: 'status'; text: string }
   | { type: 'assistant'; text: string }
-  | { type: 'tool'; name: string; detail: string }
-  | { type: 'file'; path: string; action: 'create' | 'edit' | 'delete' | 'rename' }
+  | { type: 'tool'; name: string; detail: string; ok?: boolean }
+  | { type: 'file'; path: string; action: 'create' | 'edit' | 'delete' | 'rename'; from?: string }
   | { type: 'model'; model: string; route: RouteId }
   | { type: 'error'; message: string };
 
@@ -80,5 +81,13 @@ export interface AgentResult {
   resolvedModel: string;
   summary: string;
   turns: number;
+  toolCalls: number;
   usedJsonProtocol: boolean;
+  finishReason: 'done' | 'limit' | 'stopped';
+}
+
+export interface AppSettings {
+  maxTurns: number;
+  temperature: number;
+  autoPreview: boolean;
 }

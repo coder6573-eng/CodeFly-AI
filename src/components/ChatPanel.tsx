@@ -94,8 +94,13 @@ export default function ChatPanel(props: ChatPanelProps) {
             </div>
           </div>
         ) : (
-          props.entries.map((entry) => (
-            <Entry key={entry.id} entry={entry} running={props.running} showThinking={props.showThinking} />
+          props.entries.map((entry, index) => (
+            <Entry
+              key={entry.id}
+              entry={entry}
+              live={props.running && index === props.entries.length - 1}
+              showThinking={props.showThinking}
+            />
           ))
         )}
         <div ref={bottomRef} />
@@ -148,7 +153,7 @@ export default function ChatPanel(props: ChatPanelProps) {
   );
 }
 
-function Entry({ entry, running, showThinking }: { entry: ChatEntry; running: boolean; showThinking: boolean }) {
+function Entry({ entry, live, showThinking }: { entry: ChatEntry; live: boolean; showThinking: boolean }) {
   if (entry.role === 'system') {
     return (
       <div className={'entry entry-system' + (entry.error ? ' entry-error' : '')}>{entry.text}</div>
@@ -162,7 +167,7 @@ function Entry({ entry, running, showThinking }: { entry: ChatEntry; running: bo
   return (
     <article className={'entry entry-' + entry.role + (entry.error ? ' entry-error' : '')}>
       {thinking ? (
-        <details className="thinking" open={running || undefined}>
+        <details className="thinking" open={live || undefined}>
           <summary>
             <span className="thinking-spark" aria-hidden="true">✦</span> Thinking
           </summary>

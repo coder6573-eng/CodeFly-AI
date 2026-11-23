@@ -247,8 +247,8 @@ export async function chatCompletion(options: ChatOptions): Promise<ChatOutput> 
     throw error;
   }
 
-  const choice = (data.choices && data.choices[0]) || {};
-  const message: RawMessage = choice.message || {};
+  const choice = data.choices && data.choices[0];
+  const message: RawMessage = (choice && choice.message) || {};
   const text = flattenContent(message.content).trim();
 
   return {
@@ -256,7 +256,7 @@ export async function chatCompletion(options: ChatOptions): Promise<ChatOutput> 
     reasoning: flattenReasoning(message),
     model: data.model || options.model,
     toolCalls: normalizeToolCalls(message.tool_calls),
-    finishReason: choice.finish_reason || 'stop',
+    finishReason: (choice && choice.finish_reason) || 'stop',
   };
 }
 

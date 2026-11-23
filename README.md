@@ -1,70 +1,156 @@
 # CodeFly AI
 
-Keyless, cross-platform vibe-coding platform. Describe an app and CodeFly generates a complete, runnable web project - plain HTML, CSS and vanilla JavaScript - with a live preview, a code editor and ZIP export. No accounts, no API keys, no terminal.
+**Describe an app. Watch an agent build it.** CodeFly is a keyless, cross-platform coding agent that writes complete static web projects — HTML, CSS and vanilla JS — and runs them in a live preview. No login, no API keys, no terminal.
 
-## Highlights
+Built with React + TypeScript + Vite, wrapped with Capacitor for Android and Electron for Windows.
 
-- **Six keyless AI routes** - Kilo Auto, Kilo Free Models, LLM7, Pollinations, OVHcloud and Free.ai
-- **Agent loop** - native tool calling with an automatic JSON-protocol fallback for models without tools
-- **Thinking view** - provider reasoning (reasoning_content / reasoning / thinking) and JSON-protocol thoughts appear in a collapsible Thinking block
-- **Resilient calls** - transient gateway errors (429, 5xx, network) are retried once with a status message
-- **Virtual workspace** - the model can only create, edit, rename, read and delete project files
-- **Live preview** - projects render instantly in a sandboxed iframe; local CSS/JS are inlined automatically
-- **Code editor** - CodeMirror with HTML, CSS, JavaScript and JSON support
-- **Projects** - multiple projects stored in localStorage; export any project as a ZIP
-- **Desktop + Android** - Electron (Windows) and Capacitor (Android) packaging with CI workflows
+---
 
 ## Downloads
 
-Ready-to-run builds are produced by GitHub Actions on every push to `main`:
+Ready-to-run builds are produced by GitHub Actions on every push to `main` (and on `v*` tags):
 
-- **Windows** - installer and portable EXE: grab the `codefly-windows` artifact from the latest [Build Windows EXE run](https://github.com/coder6573-eng/CodeFly-AI/actions/workflows/build-windows.yml)
-- **Android** - sideloadable debug APK: grab the `codefly-android-apk` artifact from the latest [Build Android APK run](https://github.com/coder6573-eng/CodeFly-AI/actions/workflows/build-android.yml)
+- **Windows** — installer + portable EXE: grab the `codefly-windows` artifact from the latest [Build Windows EXE run](https://github.com/coder6573-eng/CodeFly-AI/actions/workflows/build-windows.yml).
+- **Android** — sideloadable debug APK: grab the `codefly-android-apk` artifact from the latest [Build Android APK run](https://github.com/coder6573-eng/CodeFly-AI/actions/workflows/build-android.yml).
 
-## Getting started
+---
 
-Requirements: Node.js 20+
+## What makes it an agent (not a chat wrapper)
 
-    npm install
-    npm run dev
+Every request runs a real multi-step loop:
 
-The dev server runs at http://localhost:5173.
+```
+user goal
+   │
+   ▼
+system prompt + workspace snapshot + recent conversation
+   │
+   ▼
+┌──────────────────────────────────────────────┐
+│  model turn                                  │
+│    ├─ native function calls (preferred)      │
+│    └─ JSON action protocol (fallback)        │
+│                                              │
+│  tool execution on the in-memory workspace   │
+│    ├─ create / edit / delete / rename files  │
+│    ├─ observations fed back to the model     │
+│    └─ live snapshot → preview refresh        │
+└──────────────────────────────────────────────┘
+   │  repeat until finish tool / step limit
+   ▼
+summary + files + trace persisted with the project
+```
 
-## Scripts
+The agent can only act through tools, so it cannot pretend work happened. `finish` is rejected until the workspace contains a root `index.html`. Step limits, tool-call budgets and abort support keep runs bounded.
 
-- npm run dev - Vite dev server
-- npm run typecheck - TypeScript check
-- npm run build - typecheck and production build to dist/
-- npm run icons - regenerate brand assets (Windows icon, Android icon + splash)
-- npm run electron:dev - Vite + Electron
-- npm run electron:build - Windows installer
-- npm run android:sync / android:open - Capacitor Android
+### Tools
 
-## Architecture
+| Tool | Purpose |
+| --- | --- |
+| `list_files` | See every project file and its size |
+| `read_file` | Read exact text (optionally a line range) |
+| `write_file` | Create a file or fully overwrite it |
+| `edit_file` | Exact-snippet replacement, unique-match enforcement |
+| `delete_file` | Remove a stale file |
+| `rename_file` | Move or rename a file |
+| `finish` | End the run with a summary (requires `index.html`) |
 
-- src/agent/engine.ts - run loop (native tools + JSON fallback, budgets, snapshots, retries)
-- src/agent/tools.ts - virtual workspace and tool implementations
-- src/agent/prompts.ts - system prompt and protocol texts
-- src/agent/routes.ts - gateway definitions
-- src/lib/transport.ts - OpenAI-compatible HTTP transport with reasoning capture
-- src/App.tsx - app shell, project state and run orchestration
-- src/components/ - chat, workspace (preview + editor), route picker, settings
-- src/lib/preview.ts - self-contained preview document builder
-- src/lib/storage.ts - localStorage persistence
-- src/lib/exportZip.ts - project ZIP export
-- electron/ - desktop shell with an allowlisted network bridge
-- scripts/generate-icons.mjs - dependency-free brand asset renderer used by CI
+Every tool result is an observation returned to the model. Path traversal, binary content, oversized files and runaway file counts are rejected with corrective messages instead of crashing.
 
-## Routes
+### Two protocols, one loop
 
-| Route | Tools | Notes |
-| --- | --- | --- |
-| Kilo Auto | yes | auto-routed free model, 200 req/hour per IP |
-| Kilo Free Models | yes | pin an exact :free model |
-| LLM7 | yes | anonymous tier, about 30 req/min |
-| Pollinations | no | JSON action protocol fallback |
-| OVHcloud | yes | anonymous lane, about 2 req/min per model |
-| Free.ai | yes | keyless on self-hosted ids |
+- **Native tools** — routes that support OpenAI-style function calling use schemas from `src/agent/tools.ts`.
+- **JSON actions** — routes without tool support (for example Pollinations) get a strict `{"thought","action","action_input"}` protocol. Malformed replies are repaired or corrected for two retries, then the run stops cleanly.
+
+If a native route ignores the tools and replies with a JSON action, the engine detects it and switches protocol mid-run instead of wasting the turn.
+
+---
+
+## Keyless routes
+
+| Route | Default model | Tools | Notes |
+| --- | --- | --- | --- |
+| **Kilo Auto** | `kilo-auto/free` | ✅ | Server-side router, 200 req/hour per IP |
+| **Kilo Free** | `minimax/minimax-m2.1:free` | ✅ | Pin a specific free model |
+| **LLM7** | `gpt-4.1-nano` | ✅ | Anonymous tier, ~30 req/min |
+| **Pollinations** | `openai-fast` | ❌ | JSON protocol fallback |
+| **OVHcloud** | `gpt-oss-120b` | ✅ | EU-hosted, ~2 req/min anonymous |
+| **Free.ai** | `qwen-coder` | ✅ | Self-hosted open models |
+
+Route metadata lives in `src/agent/routes.ts`. Model lists are fetched at runtime when available and fall back to curated defaults.
+
+---
+
+## Workspace and preview
+
+- Projects are stored in `localStorage` (last 30), including files, chat, model route and the action trace.
+- The preview builds a **single self-contained HTML document** from the project: stylesheets and scripts are inlined, images/fonts become data URLs, and runtime errors are reported back to the IDE banner.
+- Export any project as a `.zip` with the original file paths.
+- The editor is CodeMirror with HTML/CSS/JS/TS highlighting; manual edits are first-class and feed straight back into the preview.
+
+---
+
+## Project layout
+
+```
+src/
+  agent/
+    engine.ts        multi-turn loop, native + JSON protocols, limits
+    tools.ts         workspace model, tool schemas, executor
+    prompts.ts       system prompt, workspace outline, protocol rules
+    jsonProtocol.ts  tolerant JSON-action parser
+    routes.ts        keyless gateway catalog
+  lib/
+    transport.ts     fetch/bridge layer, model discovery, errors
+    preview.ts       inlines a project into a runnable document
+    projects.ts      persistence and project helpers
+    settings.ts      run limits and temperature
+    download.ts      zip export
+  components/        chat, workbench, file tree, editor, preview, settings
+  App.tsx            orchestration and state
+  styles.css         responsive dark UI
+electron/            sandboxed desktop shell with a network allowlist
+scripts/
+  generate-icons.mjs dependency-free brand asset renderer used by CI
+```
+
+---
+
+## Development
+
+```bash
+npm install
+npm run dev          # web app on http://localhost:5173
+npm run typecheck    # tsc --noEmit
+npm run build        # typecheck + production bundle
+npm run icons        # regenerate Windows icon + Android icon/splash
+
+npm run electron:dev # desktop shell pointing at the Vite server
+npm run electron:build
+
+npm run android:add  # once
+npm run android:sync
+npm run android:open
+```
+
+CI (`.github/workflows/ci.yml`) runs typecheck + build on every push and pull request. The Android APK and Windows installer are built on every push to `main` and on `v*` tags; both workflows generate the brand assets with `scripts/generate-icons.mjs` before packaging.
+
+---
+
+## Security model
+
+- The renderer is sandboxed with context isolation and no Node integration.
+- The Electron bridge exposes exactly one channel: an HTTPS proxy restricted to the gateway allowlist. There is no shell, filesystem or terminal IPC.
+- The agent has no network tools and no command execution. It can only write text files into the virtual project.
+- Preview iframes are sandboxed; generated code runs with its own scripts but without access to the app's Node/bridge surface.
+- No secrets are required or stored. Never paste keys into a project.
+
+## Known limits
+
+- Generated projects must be static and buildless. No npm packages, servers or native code.
+- Free keyless lanes are shared per IP; HTTP 429 means wait or switch route.
+- The preview inlines relative assets; very large projects or exotic module graphs may need the exported zip run in a real browser.
+- Model quality varies. The agent verifies what it can (files, paths, required entry point) but cannot execute a browser to test behavior.
 
 ## License
 

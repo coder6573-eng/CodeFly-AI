@@ -1,8 +1,8 @@
 /**
  * CodeFly brand asset generator - zero dependencies.
  *
- * Renders the CodeFly mark (a white paper plane on the blue->violet brand
- * gradient, matching .brand-mark in src/styles.css) and writes:
+ * Renders the CodeFly mark (a white paper plane on the purple brand
+ * gradient, matching --accent / --accent-2 in src/styles.css) and writes:
  *
  *   build/icon.png        512x512   electron-builder source icon
  *   build/icon.ico        256x256   Windows installer / executable icon
@@ -85,9 +85,9 @@ function encodeIco(png256) {
 
 // ---------- rendering ----------
 
-const GRADIENT_FROM = [91, 140, 255]; // --accent #5b8cff
-const GRADIENT_TO = [138, 92, 255]; // --accent-2 #8a5cff
-const BG = [7, 8, 12]; // --bg #07080c
+const GRADIENT_FROM = [109, 94, 252]; // --accent #6d5efc
+const GRADIENT_TO = [139, 123, 255]; // --accent-2 #8b7bff
+const BG = [8, 9, 13]; // --bg #08090d
 
 /** Material "send" glyph in a 24x24 design space. */
 const PLANE = [

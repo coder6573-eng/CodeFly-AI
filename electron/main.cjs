@@ -51,8 +51,15 @@ function createWindow() {
     return { action: 'deny' };
   });
 
-  const devServer = process.env.CODEFLY_DEV_SERVER;
-  if (devServer) {
+  win.webContents.on('will-navigate', (event, url) => {
+    if (url.startsWith('file://') || url.startsWith('http://localhost:5173')) return;
+    event.preventDefault();
+    if (url.startsWith('https://')) shell.openExternal(url);
+  });
+
+  const isDev = process.argv.includes('--dev') || Boolean(process.env.CODEFLY_DEV_SERVER);
+  if (isDev) {
+    const devServer = process.env.CODEFLY_DEV_SERVER || 'http://localhost:5173';
     win.loadURL(devServer);
     win.webContents.openDevTools({ mode: 'detach' });
   } else {

@@ -11,6 +11,13 @@ const config: CapacitorConfig = {
     allowMixedContent: false,
     captureInput: true,
   },
+  plugins: {
+    // Route gateway calls through the native HTTP stack so free keyless
+    // endpoints are not blocked by WebView CORS rules.
+    CapacitorHttp: {
+      enabled: true,
+    },
+  },
 };
 
 export default config;

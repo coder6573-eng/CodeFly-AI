@@ -49,8 +49,6 @@ export interface ChatEntry {
   id: string;
   role: 'user' | 'assistant' | 'system';
   text: string;
-  /** Provider reasoning or JSON-protocol thoughts for this entry. */
-  thinking?: string;
   model?: string;
   route?: string;
   tools?: number;
@@ -72,7 +70,6 @@ export interface Project {
 
 export type AgentEvent =
   | { type: 'status'; text: string }
-  | { type: 'thinking'; text: string }
   | { type: 'assistant'; text: string }
   | { type: 'tool'; name: string; detail: string; ok?: boolean }
   | { type: 'file'; path: string; action: 'create' | 'edit' | 'delete' | 'rename'; from?: string }
@@ -92,6 +89,11 @@ export interface AgentResult {
 export interface AppSettings {
   maxTurns: number;
   temperature: number;
-  autoPreview: boolean;
-  showThinking: boolean;
+}
+
+export interface RunStep {
+  id: string;
+  name: string;
+  detail: string;
+  ok: boolean;
 }

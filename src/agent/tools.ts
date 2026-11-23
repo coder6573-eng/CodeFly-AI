@@ -252,8 +252,11 @@ export function executeTool(workspace: Workspace, name: string, rawArgs: unknown
       }
 
       case 'write_file': {
-        const path = asString(args.path);
-        const content = asString(args.content);
+        if (typeof args.path !== 'string' || typeof args.content !== 'string') {
+          return fail('write_file requires a string "path" and string "content".');
+        }
+        const path = args.path;
+        const content = args.content;
         const change = workspace.write(path, content);
         const bytes = byteLength(content);
         return ok(
@@ -263,9 +266,16 @@ export function executeTool(workspace: Workspace, name: string, rawArgs: unknown
       }
 
       case 'edit_file': {
-        const path = asString(args.path);
-        const oldString = asString(args.old_string);
-        const newString = asString(args.new_string);
+        if (
+          typeof args.path !== 'string' ||
+          typeof args.old_string !== 'string' ||
+          typeof args.new_string !== 'string'
+        ) {
+          return fail('edit_file requires string "path", "old_string" and "new_string" arguments.');
+        }
+        const path = args.path;
+        const oldString = args.old_string;
+        const newString = args.new_string;
         const result = workspace.edit(path, oldString, newString, Boolean(args.replace_all));
         return ok(
           `Edited ${path}: replaced ${result.replacements} occurrence${result.replacements === 1 ? '' : 's'}.`,
@@ -274,12 +284,16 @@ export function executeTool(workspace: Workspace, name: string, rawArgs: unknown
       }
 
       case 'delete_file': {
-        const change = workspace.remove(asString(args.path));
+        if (typeof args.path !== 'string') return fail('delete_file requires a string "path".');
+        const change = workspace.remove(args.path);
         return ok(`Deleted ${change.path}.`, [change]);
       }
 
       case 'rename_file': {
-        const change = workspace.rename(asString(args.from), asString(args.to));
+        if (typeof args.from !== 'string' || typeof args.to !== 'string') {
+          return fail('rename_file requires string "from" and "to" arguments.');
+        }
+        const change = workspace.rename(args.from, args.to);
         return ok(`Renamed ${change.from ?? '?'} to ${change.path}.`, [change]);
       }
 

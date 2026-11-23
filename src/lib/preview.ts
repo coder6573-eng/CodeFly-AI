@@ -1,253 +1,221 @@
 /**
- * Builds a self-contained HTML document for the live preview.
+ * Turns a plain file map into a single self-contained HTML document that can
+ * run inside a sandboxed iframe.
  *
- * Projects are plain HTML/CSS/vanilla JS, so local stylesheets and scripts are
- * inlined instead of relying on blob-URL module resolution. Remaining assets
- * (images, fonts, extra pages) become blob URLs. The document runs in a
- * sandboxed iframe without same-origin access; a tiny shim keeps
- * localStorage/sessionStorage usable inside the preview.
+ * Generated projects reference CSS, JS, images and fonts with relative paths.
+ * A blob URL would break those references, so instead everything reachable
+ * from the entry document is inlined as a data URL. That keeps previews
+ * offline, sandbox-friendly and instant.
  */
 
 export interface PreviewDoc {
   html: string;
-  urls: string[];
+  entry: string | null;
 }
 
 const MIME: Record<string, string> = {
   html: 'text/html',
+  htm: 'text/html',
   css: 'text/css',
   js: 'text/javascript',
   mjs: 'text/javascript',
   json: 'application/json',
+  txt: 'text/plain',
+  md: 'text/markdown',
   svg: 'image/svg+xml',
   png: 'image/png',
   jpg: 'image/jpeg',
   jpeg: 'image/jpeg',
   gif: 'image/gif',
   webp: 'image/webp',
+  avif: 'image/avif',
   ico: 'image/x-icon',
-  txt: 'text/plain',
-  md: 'text/plain',
-  xml: 'application/xml',
-  webmanifest: 'application/manifest+json',
   woff: 'font/woff',
   woff2: 'font/woff2',
   ttf: 'font/ttf',
   otf: 'font/otf',
+  mp3: 'audio/mpeg',
+  wav: 'audio/wav',
+  mp4: 'video/mp4',
+  webm: 'video/webm',
 };
 
-function mimeFor(path: string): string {
+export function mimeFor(path: string): string {
   const ext = path.split('.').pop()?.toLowerCase() ?? '';
   return MIME[ext] ?? 'application/octet-stream';
 }
 
-function dirOf(path: string): string {
-  const index = path.lastIndexOf('/');
-  return index === -1 ? '' : path.slice(0, index);
+function isTextual(mime: string): boolean {
+  return (
+    mime.startsWith('text/') ||
+    mime === 'application/json' ||
+    mime === 'application/javascript' ||
+    mime === 'image/svg+xml'
+  );
 }
 
-const EXTERNAL = /^(?:[a-z][a-z0-9+.-]*:|\/\/|#)/i;
+function encodeUtf8Base64(text: string): string {
+  const bytes = new TextEncoder().encode(text);
+  let binary = '';
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary);
+}
 
-/** Resolve a relative reference against a directory; null for external refs. */
-export function resolveRef(fromDir: string, ref: string): string | null {
-  const trimmed = ref.trim();
-  if (!trimmed || EXTERNAL.test(trimmed)) return null;
+function dataUrlFor(path: string, content: string): string {
+  const mime = mimeFor(path);
+  if (isTextual(mime)) {
+    return 'data:' + mime + ';charset=utf-8,' + encodeURIComponent(content);
+  }
+  return 'data:' + mime + ';base64,' + encodeUtf8Base64(content);
+}
 
-  const clean = trimmed.split(/[?#]/)[0];
+function getAttr(tag: string, name: string): string | null {
+  const match = tag.match(
+    new RegExp('(?:^|\\s)' + name + '\\s*=\\s*("([^"]*)"|\'([^\']*)\'|([^\\s>]+))', 'i'),
+  );
+  if (!match) return null;
+  return match[2] ?? match[3] ?? match[4] ?? '';
+}
+
+function stripAttr(tag: string, name: string): string {
+  return tag.replace(
+    new RegExp('\\s' + name + '\\s*=\\s*("([^"]*)"|\'([^\']*)\'|([^\\s>]+))', 'i'),
+    '',
+  );
+}
+
+function isExternal(ref: string): boolean {
+  return /^(?:[a-z][a-z0-9+.-]*:|\/\/|#)/i.test(ref.trim());
+}
+
+/** Resolve a relative reference against the referencing file's folder. */
+export function resolveProjectPath(
+  files: Record<string, string>,
+  basePath: string,
+  rawRef: string,
+): string | null {
+  const ref = rawRef.trim();
+  if (!ref || isExternal(ref)) return null;
+
+  const clean = ref.split('#')[0].split('?')[0];
   if (!clean) return null;
 
-  const parts = clean.startsWith('/')
-    ? clean.slice(1).split('/')
-    : [...(fromDir ? fromDir.split('/') : []), ...clean.split('/')];
+  let decoded = clean;
+  try {
+    decoded = decodeURIComponent(clean);
+  } catch {
+    /* keep the raw form */
+  }
 
-  const out: string[] = [];
-  for (const part of parts) {
+  const baseDir = basePath.includes('/') ? basePath.slice(0, basePath.lastIndexOf('/') + 1) : '';
+  const stack = decoded.startsWith('/') ? [] : baseDir.split('/').filter(Boolean);
+
+  for (const part of decoded.replace(/^\/+/, '').split('/')) {
     if (!part || part === '.') continue;
-    if (part === '..') out.pop();
-    else out.push(part);
-  }
-  return out.join('/');
-}
-
-/** Read an attribute value from an HTML tag without regex construction. */
-function attr(tag: string, name: string): string | null {
-  const lower = tag.toLowerCase();
-  const target = name.toLowerCase();
-  let index = lower.indexOf(target);
-
-  while (index !== -1) {
-    const before = index === 0 ? ' ' : lower.charAt(index - 1);
-    if (/\s/.test(before)) {
-      let cursor = index + target.length;
-      while (cursor < tag.length && /\s/.test(tag.charAt(cursor))) cursor += 1;
-      if (tag.charAt(cursor) === '=') {
-        cursor += 1;
-        while (cursor < tag.length && /\s/.test(tag.charAt(cursor))) cursor += 1;
-        const quote = tag.charAt(cursor);
-        if (quote === '"' || quote === "'") {
-          const end = tag.indexOf(quote, cursor + 1);
-          return end === -1 ? null : tag.slice(cursor + 1, end);
-        }
-        let end = cursor;
-        while (end < tag.length && !/[\s>]/.test(tag.charAt(end))) end += 1;
-        return tag.slice(cursor, end);
-      }
-    }
-    index = lower.indexOf(target, index + 1);
+    if (part === '..') stack.pop();
+    else stack.push(part);
   }
 
-  return null;
+  const path = stack.join('/');
+  return Object.prototype.hasOwnProperty.call(files, path) ? path : null;
 }
 
-function escapeScript(code: string): string {
-  return code.replace(/<\/script/gi, '<\\/script');
-}
-
-function rewriteCssUrls(
-  css: string,
-  fromDir: string,
-  blobFor: (path: string) => string | null,
-): string {
-  return css.replace(/url\(\s*(["']?)([^"')]+)\1\s*\)/gi, (match, quote: string, ref: string) => {
-    const path = resolveRef(fromDir, ref);
+function inlineCssAssets(files: Record<string, string>, css: string, cssPath: string): string {
+  return css.replace(/url\(\s*(['"]?)([^'")]+)\1\s*\)/gi, (match, _quote: string, ref: string) => {
+    const path = resolveProjectPath(files, cssPath, ref);
     if (!path) return match;
-    const url = blobFor(path);
-    return url ? 'url(' + quote + url + quote + ')' : match;
+    return 'url("' + dataUrlFor(path, files[path]) + '")';
   });
 }
 
-/**
- * Best-effort module bundling: inline relative imports depth-first and strip
- * module syntax so the result runs as a classic script. Typical CodeFly
- * projects are classic scripts; this only covers simple module graphs.
- */
-function bundleModule(
-  files: Record<string, string>,
-  path: string,
-  seen: Set<string>,
-  depth = 0,
-): string {
-  if (seen.has(path) || depth > 8) return '';
-  seen.add(path);
-
-  const source = files[path] ?? '';
-  const chunks: string[] = [];
-
-  const importPattern = /(?:^|\n)\s*import\s+(?:[^'"]*?\s+from\s+)?(["'])([^"']+)\1\s*;?/g;
-  const stripped = source.replace(importPattern, (match, _quote: string, ref: string) => {
-    const dependency = resolveRef(dirOf(path), ref);
-    if (dependency && Object.prototype.hasOwnProperty.call(files, dependency)) {
-      chunks.push(bundleModule(files, dependency, seen, depth + 1));
-      return '\n';
-    }
-    return match;
-  });
-
-  const cleaned = stripped
-    .replace(/(?:^|\n)\s*export\s*\{[^}]*\}\s*;?/g, '\n')
-    .replace(/(?:^|\n)\s*export\s*\*\s*from\s*["'][^"']+["']\s*;?/g, '\n')
-    .replace(/(?:^|\n)\s*export\s+default\s+/g, '\n')
-    .replace(/(?:^|\n)\s*export\s+(?:const|let|var|function|class|async)\s+/g, (match) =>
-      match.replace('export ', ''),
-    );
-
-  return chunks.filter(Boolean).join('\n') + '\n' + cleaned;
+function escapeHtml(text: string): string {
+  return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
-const STORAGE_SHIM = [
-  '<script>',
-  '(function () {',
-  '  function createStore() {',
-  '    var data = {};',
-  '    return {',
-  '      getItem: function (key) {',
-  '        return Object.prototype.hasOwnProperty.call(data, String(key)) ? data[String(key)] : null;',
-  '      },',
-  '      setItem: function (key, value) { data[String(key)] = String(value); },',
-  '      removeItem: function (key) { delete data[String(key)]; },',
-  '      clear: function () { data = {}; },',
-  '      key: function (index) {',
-  '        var keys = Object.keys(data);',
-  '        return index < keys.length ? keys[index] : null;',
-  '      },',
-  '      get length() { return Object.keys(data).length; }',
-  '    };',
-  '  }',
-  '  ["localStorage", "sessionStorage"].forEach(function (name) {',
-  '    try {',
-  '      window[name].setItem("__codefly_probe__", "1");',
-  '      window[name].removeItem("__codefly_probe__");',
-  '    } catch (error) {',
-  '      try {',
-  '        Object.defineProperty(window, name, { value: createStore(), configurable: true });',
-  '      } catch (ignored) { /* nothing else we can do */ }',
-  '    }',
-  '  });',
-  '})();',
-  '</script>',
-].join('\n');
+function pickEntry(files: Record<string, string>, preferred?: string | null): string | null {
+  if (preferred && Object.prototype.hasOwnProperty.call(files, preferred)) return preferred;
+  if (Object.prototype.hasOwnProperty.call(files, 'index.html')) return 'index.html';
 
-export function buildPreview(files: Record<string, string>): PreviewDoc | null {
-  const entry = files['index.html'];
-  if (typeof entry !== 'string') return null;
+  const htmlFiles = Object.keys(files)
+    .filter((path) => /\.html?$/i.test(path))
+    .sort((a, b) => a.split('/').length - b.split('/').length || a.localeCompare(b));
 
-  const urls: string[] = [];
-  const blobFor = (path: string): string | null => {
-    if (!Object.prototype.hasOwnProperty.call(files, path)) return null;
-    const url = URL.createObjectURL(new Blob([files[path]], { type: mimeFor(path) }));
-    urls.push(url);
-    return url;
-  };
+  return htmlFiles[0] ?? null;
+}
 
-  let html = entry;
+function emptyPreview(): string {
+  return [
+    '<!doctype html><html><head><meta charset="utf-8"><style>',
+    ':root{color-scheme:dark}body{margin:0;min-height:100vh;display:grid;place-items:center;',
+    'background:#08090d;color:#8b93a7;font:14px/1.6 ui-sans-serif,system-ui,sans-serif;text-align:center;}',
+    '.card{padding:32px;border:1px solid rgba(255,255,255,.08);border-radius:16px;max-width:360px;}',
+    'h1{font-size:15px;color:#e7ebf5;margin:0 0 6px;}p{margin:0;}',
+    '</style></head><body><div class="card"><h1>Nothing to preview yet</h1><p>Ask the agent to build index.html.</p></div></body></html>',
+  ].join('');
+}
 
-  // Inline local stylesheets.
+export function buildPreview(files: Record<string, string>, preferredEntry?: string | null): PreviewDoc {
+  const entry = pickEntry(files, preferredEntry);
+  if (!entry) return { html: emptyPreview(), entry: null };
+
+  let html = files[entry];
+
+  // Inline project stylesheets.
   html = html.replace(/<link\b[^>]*>/gi, (tag) => {
-    if (!/\brel\s*=\s*["']?stylesheet/i.test(tag)) return tag;
-    const href = attr(tag, 'href');
-    const path = href ? resolveRef('', href) : null;
-    if (!path || !Object.prototype.hasOwnProperty.call(files, path)) return tag;
-    const css = rewriteCssUrls(files[path], dirOf(path), blobFor);
-    return '<style>\n' + css + '\n</style>';
+    const href = getAttr(tag, 'href');
+    const rel = (getAttr(tag, 'rel') ?? '').toLowerCase();
+    if (!href || !rel.includes('stylesheet')) return tag;
+    const path = resolveProjectPath(files, entry, href);
+    if (!path) return tag;
+    const css = inlineCssAssets(files, files[path], path);
+    return '<style data-codefly-src="' + escapeHtml(path) + '">\n' + css + '\n</style>';
   });
 
-  // Inline local scripts (classic scripts directly, modules best-effort).
-  html = html.replace(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi, (tag, attrs: string) => {
-    const src = attr(attrs, 'src');
-    if (!src) return tag;
-    const path = resolveRef('', src);
-    if (!path || !Object.prototype.hasOwnProperty.call(files, path)) return tag;
-    const isModule = /\btype\s*=\s*["']?module/i.test(attrs);
-    const code = isModule ? bundleModule(files, path, new Set()) : files[path];
-    return '<script>\n' + escapeScript(code) + '\n</script>';
+  // Inline project scripts so ES modules and classic scripts both resolve.
+  html = html.replace(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi, (match, attrs: string, body: string) => {
+    const src = getAttr(attrs, 'src');
+    if (!src) return match;
+    const path = resolveProjectPath(files, entry, src);
+    if (!path) return match;
+
+    const cleaned = stripAttr(attrs, 'src').replace(/\s+integrity\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/i, '').trim();
+    const code = files[path];
+    return '<script' + (cleaned ? ' ' + cleaned : '') + ' data-codefly-src="' + escapeHtml(path) + '">\n' + code + '\n</script>';
   });
 
-  // Rewrite url() inside inline <style> blocks.
-  html = html.replace(/<style\b[^>]*>([\s\S]*?)<\/style>/gi, (tag, css: string) => {
-    return '<style>' + rewriteCssUrls(css, '', blobFor) + '</style>';
-  });
-
-  // Rewrite remaining local asset references (images, icons, fonts, links).
+  // Replace remaining asset references (img/src, video/poster, anchors, icons).
   html = html.replace(
-    /(\s(?:src|href|poster)\s*=\s*)(["'])([^"']*)\2/gi,
-    (match, prefix: string, quote: string, ref: string) => {
-      const path = resolveRef('', ref);
-      if (!path || !Object.prototype.hasOwnProperty.call(files, path) || path === 'index.html') {
-        return match;
-      }
-      const url = blobFor(path);
-      return url ? prefix + quote + url + quote : match;
+    /\s(src|href|poster)\s*=\s*("([^"]*)"|'([^']*)'|([^\s>]+))/gi,
+    (match, attr: string, _all: string, doubleQuoted?: string, singleQuoted?: string, bare?: string) => {
+      const ref = doubleQuoted ?? singleQuoted ?? bare ?? '';
+      const path = resolveProjectPath(files, entry, ref);
+      if (!path) return match;
+      return ' ' + attr + '="' + dataUrlFor(path, files[path]) + '"';
     },
   );
 
-  // Keep localStorage/sessionStorage working inside the sandboxed frame.
-  if (/<head\b[^>]*>/i.test(html)) {
-    html = html.replace(/<head\b[^>]*>/i, (head) => head + '\n' + STORAGE_SHIM);
-  } else if (/<html\b[^>]*>/i.test(html)) {
-    html = html.replace(/<html\b[^>]*>/i, (tag) => tag + '\n' + STORAGE_SHIM);
+  const reporter = [
+    '<script data-codefly-runtime="1">',
+    '(function(){',
+    'var mem={};try{window.localStorage.getItem("__codefly_probe__")}catch(e){',
+    'var shim={getItem:function(k){return Object.prototype.hasOwnProperty.call(mem,k)?mem[k]:null},setItem:function(k,v){mem[k]=String(v)},removeItem:function(k){delete mem[k]},clear:function(){mem={}},key:function(i){return Object.keys(mem)[i]||null},get length(){return Object.keys(mem).length}};',
+    'try{Object.defineProperty(window,"localStorage",{value:shim,configurable:true})}catch(e2){}',
+    'try{Object.defineProperty(window,"sessionStorage",{value:shim,configurable:true})}catch(e3){}',
+    '}',
+    'function send(m){try{parent.postMessage({source:"codefly-preview",type:"error",message:String(m)},"*")}catch(e){}}',
+    'window.addEventListener("error",function(e){send((e.message||"Script error")+(e.lineno?" (line "+e.lineno+")":""))});',
+    'window.addEventListener("unhandledrejection",function(e){var r=e.reason;send("Unhandled promise rejection: "+((r&&r.message)||r))});',
+    'var original=console.error;console.error=function(){send(Array.prototype.slice.call(arguments).join(" "));original.apply(console,arguments)};',
+    '})();',
+    '</script>',
+  ].join('');
+
+  if (!/^\s*<!doctype/i.test(html)) html = '<!doctype html>\n' + html;
+  if (/<head[^>]*>/i.test(html)) {
+    html = html.replace(/<head[^>]*>/i, (tag) => tag + '\n<meta charset="utf-8">\n<base target="_blank">\n' + reporter);
   } else {
-    html = STORAGE_SHIM + '\n' + html;
+    html = '<meta charset="utf-8"><base target="_blank">' + reporter + html;
   }
 
-  return { html, urls };
+  return { html, entry };
 }

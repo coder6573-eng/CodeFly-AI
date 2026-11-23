@@ -1,59 +1,88 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
-import ChatPanel from './components/ChatPanel';
-import RoutePicker from './components/RoutePicker';
-import SettingsDialog from './components/SettingsDialog';
-import WorkspacePanel from './components/WorkspacePanel';
-import { AgentStoppedError, runAgent } from './agent/engine';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type {
+  AgentEvent,
+  AppSettings,
+  ModelInfo,
+  Project,
+  RouteId,
+  RunStep,
+} from './types';
 import { getRoute } from './agent/routes';
-import { downloadProjectZip } from './lib/exportZip';
+import { AgentStoppedError, runAgent } from './agent/engine';
+import { fetchModels, friendlyError } from './lib/transport';
 import {
+  createEntry,
+  createProject,
+  deriveProjectName,
   loadActiveId,
   loadProjects,
-  loadSettings,
-  newProject,
   saveActiveId,
   saveProjects,
-  saveSettings,
   uid,
-} from './lib/storage';
-import { friendlyError } from './lib/transport';
-import type { AppSettings, ChatEntry, Project, RouteId } from './types';
+} from './lib/projects';
+import { loadSettings, saveSettings } from './lib/settings';
+import { downloadProjectZip } from './lib/download';
+import Sidebar from './components/Sidebar';
+import ChatPanel from './components/ChatPanel';
+import Workbench, { type WorkbenchTab } from './components/Workbench';
+import SettingsModal from './components/SettingsModal';
+import { Icon, Logo, Spinner } from './components/Icons';
+
+type MobileView = 'chat' | 'work';
+
+interface FilePrompt {
+  mode: 'new' | 'rename';
+  path?: string;
+  value: string;
+}
+
+function bootstrap(): { projects: Project[]; activeId: string; settings: AppSettings } {
+  const stored = loadProjects();
+  const projects = stored.length > 0 ? stored : [createProject('My first app')];
+  const saved = loadActiveId();
+  const activeId = projects.some((project) => project.id === saved) ? (saved as string) : projects[0].id;
+  return { projects, activeId, settings: loadSettings() };
+}
 
 export default function App() {
-  const [projects, setProjects] = useState<Project[]>(() => {
-    const stored = loadProjects();
-    return stored.length > 0 ? stored : [newProject('My first app')];
-  });
-  const [activeId, setActiveId] = useState<string>(() => loadActiveId() ?? '');
-  const [settings, setSettings] = useState<AppSettings>(loadSettings);
-  const [showSettings, setShowSettings] = useState(false);
-  const [running, setRunning] = useState(false);
-  const [status, setStatus] = useState('');
-  const [exporting, setExporting] = useState(false);
-  const [mobileView, setMobileView] = useState<'chat' | 'workspace'>('chat');
-  const [renaming, setRenaming] = useState(false);
-  const [draftName, setDraftName] = useState('');
-  const abortRef = useRef<AbortController | null>(null);
+  const [boot] = useState(bootstrap);
+  const [projects, setProjects] = useState<Project[]>(boot.projects);
+  const [activeId, setActiveId] = useState<string>(boot.activeId);
+  const [settings, setSettings] = useState<AppSettings>(boot.settings);
 
-  const active = useMemo(
-    () => projects.find((project) => project.id === activeId) ?? projects[0] ?? null,
+  const [activeFile, setActiveFile] = useState<string | null>(null);
+  const [tab, setTab] = useState<WorkbenchTab>('preview');
+  const [mobileView, setMobileView] = useState<MobileView>('chat');
+  const [mobileRail, setMobileRail] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [filePrompt, setFilePrompt] = useState<FilePrompt | null>(null);
+  const [fileError, setFileError] = useState('');
+
+  const [running, setRunning] = useState(false);
+  const [activity, setActivity] = useState('');
+  const [steps, setSteps] = useState<RunStep[]>([]);
+  const [liveModel, setLiveModel] = useState('');
+  const [models, setModels] = useState<ModelInfo[]>([]);
+  const [loadingModels, setLoadingModels] = useState(false);
+  const [toast, setToast] = useState<string | null>(null);
+
+  const abortRef = useRef<AbortController | null>(null);
+  const stepsRef = useRef<RunStep[]>([]);
+
+  const project = useMemo(
+    () => projects.find((item) => item.id === activeId) ?? projects[0],
     [projects, activeId],
   );
+  const route = getRoute(project?.routeId);
 
-  useEffect(() => {
-    if (projects.length === 0) {
-      const fresh = newProject('My first app');
-      setProjects([fresh]);
-      setActiveId(fresh.id);
-      return;
-    }
-    if (!projects.some((project) => project.id === activeId)) {
-      setActiveId(projects[0].id);
-    }
-  }, [projects, activeId]);
+  const patchProject = useCallback((id: string, updater: (current: Project) => Project) => {
+    setProjects((previous) => previous.map((item) => (item.id === id ? updater(item) : item)));
+  }, []);
 
+  // Debounced persistence keeps typing and live snapshots cheap.
   useEffect(() => {
-    saveProjects(projects);
+    const timer = setTimeout(() => saveProjects(projects), 250);
+    return () => clearTimeout(timer);
   }, [projects]);
 
   useEffect(() => {
@@ -64,311 +93,487 @@ export default function App() {
     saveSettings(settings);
   }, [settings]);
 
-  const updateProject = (id: string, updater: (project: Project) => Project) => {
-    setProjects((current) =>
-      current.map((project) =>
-        project.id === id ? { ...updater(project), updatedAt: Date.now() } : project,
-      ),
-    );
-  };
+  useEffect(() => {
+    if (!toast) return;
+    const timer = setTimeout(() => setToast(null), 3_600);
+    return () => clearTimeout(timer);
+  }, [toast]);
 
-  const handleRun = async (goal: string) => {
-    if (!active || running) return;
+  // Pick a sensible open file when switching projects.
+  useEffect(() => {
+    setActiveFile((previous) => {
+      if (previous && project.files[previous] !== undefined) return previous;
+      if (project.files['index.html'] !== undefined) return 'index.html';
+      return Object.keys(project.files)[0] ?? null;
+    });
+    setSteps([]);
+    setActivity('');
+  }, [project.id]);
 
-    const projectId = active.id;
-    const route = getRoute(active.routeId);
-    const history = active.chat;
-    const files = active.files;
-
-    const userEntry: ChatEntry = { id: uid(), role: 'user', text: goal, at: Date.now() };
-    const liveId = uid();
-    const liveEntry: ChatEntry = {
-      id: liveId,
-      role: 'assistant',
-      text: '',
-      thinking: '',
-      model: route.defaultModel,
-      route: route.id,
-      steps: [],
-      tools: 0,
-      at: Date.now(),
+  // Never let a run keep writing into a project the user left.
+  useEffect(() => {
+    return () => {
+      abortRef.current?.abort();
     };
+  }, [project.id]);
 
-    updateProject(projectId, (project) => ({
-      ...project,
-      chat: [...project.chat, userEntry, liveEntry],
-    }));
+  const refreshModels = useCallback(async () => {
+    setLoadingModels(true);
+    try {
+      const list = await fetchModels(getRoute(project.routeId));
+      setModels(list);
+    } finally {
+      setLoadingModels(false);
+    }
+  }, [project.routeId]);
 
-    setRunning(true);
-    setStatus('Preparing workspace');
+  useEffect(() => {
+    if (!settingsOpen) return;
+    void refreshModels();
+  }, [settingsOpen, refreshModels]);
+
+  const handleSend = async (raw: string) => {
+    const goal = raw.trim();
+    if (!goal || running || !project) return;
+
+    const projectId = project.id;
+    const activeRoute = getRoute(project.routeId);
     const controller = new AbortController();
     abortRef.current = controller;
+    stepsRef.current = [];
+    setSteps([]);
+    setRunning(true);
+    setActivity('Preparing workspace');
+    setLiveModel(project.model ?? activeRoute.defaultModel);
+    setMobileView('chat');
 
-    const patchLive = (patch: (entry: ChatEntry) => ChatEntry) => {
-      updateProject(projectId, (project) => ({
-        ...project,
-        chat: project.chat.map((entry) => (entry.id === liveId ? patch(entry) : entry)),
-      }));
-    };
+    patchProject(projectId, (current) => ({
+      ...current,
+      name:
+        current.name === 'Untitled project' || current.name === 'My first app'
+          ? deriveProjectName(goal)
+          : current.name,
+      chat: [...current.chat, createEntry('user', goal)],
+      updatedAt: Date.now(),
+    }));
 
     try {
       const result = await runAgent({
-        route,
-        model: active.model,
+        route: activeRoute,
+        model: project.model,
         goal,
-        files,
-        history,
+        files: project.files,
+        history: project.chat,
         maxTurns: settings.maxTurns,
         temperature: settings.temperature,
         signal: controller.signal,
-        onEvent: (event) => {
-          if (event.type === 'status') {
-            setStatus(event.text);
-          } else if (event.type === 'thinking') {
-            patchLive((entry) => ({
-              ...entry,
-              thinking: entry.thinking ? entry.thinking + '\n\n' + event.text : event.text,
-            }));
-          } else if (event.type === 'assistant') {
-            patchLive((entry) => ({
-              ...entry,
-              text: entry.text ? entry.text + '\n\n' + event.text : event.text,
-            }));
-          } else if (event.type === 'tool') {
-            patchLive((entry) => ({
-              ...entry,
-              tools: (entry.tools ?? 0) + 1,
-              steps: [...(entry.steps ?? []), (event.ok === false ? '✗ ' : '✓ ') + event.detail].slice(-200),
-            }));
-          } else if (event.type === 'model') {
-            patchLive((entry) => ({ ...entry, model: event.model, route: event.route }));
-          } else if (event.type === 'error') {
-            patchLive((entry) => ({
-              ...entry,
-              error: true,
-              text: entry.text ? entry.text + '\n\n' + event.message : event.message,
-            }));
+        onEvent: (event: AgentEvent) => {
+          if (event.type === 'status') setActivity(event.text);
+          if (event.type === 'assistant') setActivity(event.text.slice(0, 160));
+          if (event.type === 'model') setLiveModel(event.model);
+          if (event.type === 'error') setActivity(event.message);
+          if (event.type === 'tool') {
+            const step: RunStep = {
+              id: uid('step'),
+              name: event.name,
+              detail: event.detail,
+              ok: event.ok !== false,
+            };
+            stepsRef.current = [...stepsRef.current.slice(-59), step];
+            setSteps(stepsRef.current);
+            setActivity(event.detail);
           }
         },
-        onSnapshot: (snapshotFiles) => {
-          updateProject(projectId, (project) => ({ ...project, files: snapshotFiles }));
+        onSnapshot: (files) => {
+          patchProject(projectId, (current) => ({ ...current, files, updatedAt: Date.now() }));
+          setActiveFile((previous) => {
+            if (previous && files[previous] !== undefined) return previous;
+            if (files['index.html'] !== undefined) return 'index.html';
+            return Object.keys(files)[0] ?? null;
+          });
         },
       });
 
-      const note =
-        result.finishReason === 'limit'
-          ? '\n\n_Reached the step limit - send a follow-up message to continue._'
-          : '';
-
-      patchLive((entry) => ({
-        ...entry,
-        text: (result.summary || entry.text || 'Done.') + note,
+      const assistant = createEntry('assistant', result.summary, {
         model: result.resolvedModel,
-        route: route.id,
+        route: activeRoute.label,
         tools: result.toolCalls,
+        steps: stepsRef.current.map((step) => step.name + ' — ' + step.detail),
+      });
+
+      patchProject(projectId, (current) => ({
+        ...current,
+        files: result.files,
+        chat: [...current.chat, assistant],
+        updatedAt: Date.now(),
       }));
+
+      if (result.finishReason === 'limit') {
+        setToast('Step limit reached — ask the agent to continue if anything is missing.');
+      } else {
+        setToast('Build finished');
+      }
+      setTab('preview');
+      setMobileView('work');
     } catch (error) {
-      if (error instanceof AgentStoppedError) {
-        patchLive((entry) => ({
-          ...entry,
-          text: entry.text || 'Stopped.',
-          steps: [...(entry.steps ?? []), '✗ Stopped by user'],
+      const aborted =
+        error instanceof AgentStoppedError ||
+        (error instanceof DOMException && error.name === 'AbortError');
+
+      if (aborted) {
+        patchProject(projectId, (current) => ({
+          ...current,
+          chat: [
+            ...current.chat,
+            createEntry('system', 'Run stopped. Files written so far were kept.'),
+          ],
+          updatedAt: Date.now(),
         }));
       } else {
-        patchLive((entry) => ({
-          ...entry,
-          error: true,
-          text: (entry.text ? entry.text + '\n\n' : '') + friendlyError(error),
+        const message = friendlyError(error);
+        patchProject(projectId, (current) => ({
+          ...current,
+          chat: [
+            ...current.chat,
+            createEntry('assistant', message, { error: true, model: activeRoute.label }),
+          ],
+          updatedAt: Date.now(),
         }));
+        setToast(message);
       }
     } finally {
-      abortRef.current = null;
-      setRunning(false);
-      setStatus('');
+      if (abortRef.current === controller) {
+        abortRef.current = null;
+        setRunning(false);
+        setSteps([]);
+        setActivity('');
+      }
     }
   };
 
   const handleStop = () => {
     abortRef.current?.abort();
+    setActivity('Stopping…');
   };
 
-  const handleRouteChange = (routeId: RouteId, model: string | null) => {
-    if (!active) return;
-    updateProject(active.id, (project) => ({ ...project, routeId, model }));
+  const handleRoute = (id: RouteId) => {
+    patchProject(project.id, (current) => ({ ...current, routeId: id, model: null }));
+    setModels([]);
   };
 
-  const handleFilesChange = (files: Record<string, string>) => {
-    if (!active) return;
-    updateProject(active.id, (project) => ({ ...project, files }));
+  const handleModel = (id: string | null) => {
+    patchProject(project.id, (current) => ({ ...current, model: id }));
   };
 
-  const handleExport = async () => {
-    if (!active || exporting) return;
-    setExporting(true);
-    try {
-      await downloadProjectZip(active);
-    } catch (error) {
-      window.alert('Could not export the ZIP: ' + friendlyError(error));
-    } finally {
-      setExporting(false);
-    }
-  };
-
-  const addProject = () => {
-    const project = newProject('Project ' + (projects.length + 1));
-    setProjects((current) => [...current, project]);
-    setActiveId(project.id);
+  const handleNewProject = () => {
+    const created = createProject('Untitled project');
+    setProjects((previous) => [created, ...previous]);
+    setActiveId(created.id);
+    setActiveFile(null);
+    setTab('preview');
     setMobileView('chat');
+    setMobileRail(false);
   };
 
-  const deleteProject = () => {
-    if (!active) return;
-    if (!window.confirm('Delete "' + active.name + '" and all its files?')) return;
-    const remaining = projects.filter((project) => project.id !== active.id);
+  const handleSelectProject = (id: string) => {
+    setActiveId(id);
+    setMobileRail(false);
+    setMobileView('chat');
+    setTab('preview');
+  };
+
+  const handleDeleteProject = (id: string) => {
+    if (!window.confirm('Delete this project and all of its files?')) return;
+    const remaining = projects.filter((item) => item.id !== id);
     if (remaining.length === 0) {
-      const fresh = newProject('My first app');
-      setProjects([fresh]);
-      setActiveId(fresh.id);
+      const created = createProject('My first app');
+      setProjects([created]);
+      setActiveId(created.id);
       return;
     }
     setProjects(remaining);
-    if (active.id === activeId) setActiveId(remaining[0].id);
+    if (activeId === id) setActiveId(remaining[0].id);
   };
 
-  const startRename = () => {
-    if (!active) return;
-    setDraftName(active.name);
-    setRenaming(true);
+  const updateFile = (path: string, content: string) => {
+    patchProject(project.id, (current) => ({
+      ...current,
+      files: { ...current.files, [path]: content },
+      updatedAt: Date.now(),
+    }));
   };
 
-  const commitRename = () => {
-    const name = draftName.trim();
-    if (active && name) updateProject(active.id, (project) => ({ ...project, name }));
-    setRenaming(false);
+  const openNewFile = () => {
+    setFileError('');
+    setFilePrompt({ mode: 'new', value: 'app.js' });
   };
+
+  const openRenameFile = (path: string) => {
+    setFileError('');
+    setFilePrompt({ mode: 'rename', path, value: path });
+  };
+
+  const closeFilePrompt = () => {
+    setFilePrompt(null);
+    setFileError('');
+  };
+
+  const submitFilePrompt = () => {
+    if (!filePrompt) return;
+    const target = filePrompt.value.trim().replace(/^\/+/, '');
+
+    if (!target) {
+      setFileError('Enter a file path.');
+      return;
+    }
+    if (filePrompt.mode === 'new') {
+      if (project.files[target] !== undefined) {
+        setFileError('That file already exists.');
+        return;
+      }
+      patchProject(project.id, (current) => ({
+        ...current,
+        files: { ...current.files, [target]: '' },
+        updatedAt: Date.now(),
+      }));
+      setActiveFile(target);
+      setTab('files');
+      setMobileView('work');
+      closeFilePrompt();
+      return;
+    }
+
+    const from = filePrompt.path;
+    if (!from) return closeFilePrompt();
+    if (target === from) return closeFilePrompt();
+    if (project.files[target] !== undefined) {
+      setFileError('A file with that name already exists.');
+      return;
+    }
+    patchProject(project.id, (current) => {
+      const files = { ...current.files };
+      files[target] = files[from];
+      delete files[from];
+      return { ...current, files, updatedAt: Date.now() };
+    });
+    setActiveFile((previous) => (previous === from ? target : previous));
+    closeFilePrompt();
+  };
+
+  const handleDeleteFile = (path: string) => {
+    if (!window.confirm('Delete ' + path + '?')) return;
+    patchProject(project.id, (current) => {
+      const files = { ...current.files };
+      delete files[path];
+      return { ...current, files, updatedAt: Date.now() };
+    });
+    setActiveFile((previous) => {
+      if (previous !== path) return previous;
+      const remaining = Object.keys(project.files).filter((item) => item !== path);
+      if (remaining.includes('index.html')) return 'index.html';
+      return remaining[0] ?? null;
+    });
+  };
+
+  const handleDownload = async () => {
+    try {
+      await downloadProjectZip(project.name, project.files);
+      setToast('Project exported as a zip');
+    } catch (error) {
+      setToast('Could not export: ' + friendlyError(error));
+    }
+  };
+
+  const runtime =
+    typeof window !== 'undefined' && window.codefly?.runtime === 'electron' ? 'desktop' : 'web';
 
   return (
-    <div className={'app mobile-' + mobileView}>
-      <header className="topbar">
-        <div className="brand">
-          <span className="brand-mark" aria-hidden="true">✈</span>
-          <span className="brand-name">
-            CodeFly<span> AI</span>
-          </span>
-        </div>
+    <div className="app">
+      <Sidebar
+        projects={projects}
+        activeId={project.id}
+        open={mobileRail}
+        runtime={runtime}
+        routeLabel={route.label}
+        onClose={() => setMobileRail(false)}
+        onSelect={handleSelectProject}
+        onNew={handleNewProject}
+        onDelete={handleDeleteProject}
+        onSettings={() => setSettingsOpen(true)}
+      />
 
-        <div className="project-bar">
-          {renaming ? (
+      <main className="main">
+        <header className="topbar">
+          <button
+            className="icon-btn mobile-menu"
+            onClick={() => setMobileRail(true)}
+            aria-label="Open projects"
+          >
+            <Icon name="menu" />
+          </button>
+
+          <div className="topbar-title">
+            <Logo size={24} />
             <input
-              autoFocus
-              className="rename-input"
-              value={draftName}
-              onChange={(event) => setDraftName(event.target.value)}
-              onBlur={commitRename}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter') commitRename();
-                if (event.key === 'Escape') setRenaming(false);
+              className="project-title"
+              value={project.name}
+              onChange={(event) =>
+                patchProject(project.id, (current) => ({ ...current, name: event.target.value }))
+              }
+              onBlur={() => {
+                if (!project.name.trim()) {
+                  patchProject(project.id, (current) => ({ ...current, name: 'Untitled project' }));
+                }
               }}
+              aria-label="Project name"
+              spellCheck={false}
             />
-          ) : (
-            <select
-              className="project-select"
-              aria-label="Project"
-              value={active?.id ?? ''}
-              onChange={(event) => setActiveId(event.target.value)}
+            {running && (
+              <span className="topbar-run">
+                <Spinner size={13} /> agent running
+              </span>
+            )}
+          </div>
+
+          <div className="topbar-actions">
+            <button className="route-pill" onClick={() => setSettingsOpen(true)} title="Change AI route">
+              <span className="live-dot" />
+              <span className="route-pill-label">{route.label}</span>
+              <Icon name="chevronDown" size={13} />
+            </button>
+            <button className="ghost-btn topbar-export" onClick={handleDownload}>
+              <Icon name="download" size={14} />
+              <span>Export</span>
+            </button>
+            <button
+              className="icon-btn"
+              onClick={() => setSettingsOpen(true)}
+              aria-label="Open settings"
             >
-              {projects.map((project) => (
-                <option key={project.id} value={project.id}>
-                  {project.name}
-                </option>
-              ))}
-            </select>
-          )}
-          <button type="button" className="icon-button" onClick={addProject} title="New project">
-            ＋
-          </button>
-          <button
-            type="button"
-            className="icon-button"
-            onClick={startRename}
-            title="Rename project"
-            disabled={!active}
-          >
-            ✎
-          </button>
-          <button
-            type="button"
-            className="icon-button"
-            onClick={deleteProject}
-            title="Delete project"
-            disabled={!active}
-          >
-            🗑
-          </button>
+              <Icon name="settings" />
+            </button>
+          </div>
+        </header>
+
+        <div className="workspace">
+          <div className={'pane chat-pane' + (mobileView === 'chat' ? ' mobile-active' : '')}>
+            <ChatPanel
+              project={project}
+              running={running}
+              activity={activity}
+              steps={steps}
+              liveModel={liveModel}
+              onSend={handleSend}
+              onStop={handleStop}
+            />
+          </div>
+          <div className={'pane work-pane' + (mobileView === 'work' ? ' mobile-active' : '')}>
+            <Workbench
+              project={project}
+              tab={tab}
+              activeFile={activeFile}
+              onTab={setTab}
+              onSelectFile={setActiveFile}
+              onChangeFile={updateFile}
+              onNewFile={openNewFile}
+              onDeleteFile={handleDeleteFile}
+              onRenameFile={openRenameFile}
+              onDownload={handleDownload}
+            />
+          </div>
         </div>
 
-        <div className="topbar-right">
-          {active ? (
-            <RoutePicker routeId={active.routeId} model={active.model} onChange={handleRouteChange} />
-          ) : null}
+        <nav className="mobile-nav" aria-label="Views">
           <button
-            type="button"
-            className="icon-button"
-            onClick={() => setShowSettings(true)}
-            title="Settings"
+            className={mobileView === 'chat' ? 'active' : ''}
+            onClick={() => setMobileView('chat')}
           >
-            ⚙
+            <Icon name="chat" size={17} /> Chat
           </button>
-        </div>
-      </header>
-
-      <main className="layout">
-        <ChatPanel
-          entries={active?.chat ?? []}
-          running={running}
-          status={status}
-          disabled={!active}
-          showThinking={settings.showThinking}
-          onRun={handleRun}
-          onStop={handleStop}
-        />
-        <WorkspacePanel
-          files={active?.files ?? {}}
-          onFilesChange={handleFilesChange}
-          autoPreview={settings.autoPreview}
-          running={running}
-          exporting={exporting}
-          onExport={handleExport}
-        />
+          <button
+            className={mobileView === 'work' && tab === 'preview' ? 'active' : ''}
+            onClick={() => {
+              setTab('preview');
+              setMobileView('work');
+            }}
+          >
+            <Icon name="eye" size={17} /> Preview
+          </button>
+          <button
+            className={mobileView === 'work' && tab === 'files' ? 'active' : ''}
+            onClick={() => {
+              setTab('files');
+              setMobileView('work');
+            }}
+          >
+            <Icon name="code" size={17} /> Files
+          </button>
+        </nav>
       </main>
 
-      <nav className="mobile-nav" aria-label="Views">
-        <button
-          type="button"
-          className={mobileView === 'chat' ? 'active' : ''}
-          onClick={() => setMobileView('chat')}
-        >
-          Chat
-        </button>
-        <button
-          type="button"
-          className={mobileView === 'workspace' ? 'active' : ''}
-          onClick={() => setMobileView('workspace')}
-        >
-          Workspace
-        </button>
-      </nav>
+      <SettingsModal
+        open={settingsOpen}
+        routeId={project.routeId}
+        model={project.model}
+        models={models}
+        loadingModels={loadingModels}
+        settings={settings}
+        onClose={() => setSettingsOpen(false)}
+        onRoute={handleRoute}
+        onModel={handleModel}
+        onRefreshModels={() => void refreshModels()}
+        onSettings={setSettings}
+      />
 
-      {showSettings ? (
-        <SettingsDialog
-          settings={settings}
-          onSave={(next) => {
-            setSettings(next);
-            setShowSettings(false);
+      {filePrompt && (
+        <div
+          className="modal-overlay file-dialog-overlay"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) closeFilePrompt();
           }}
-          onClose={() => setShowSettings(false)}
-        />
-      ) : null}
+        >
+          <form
+            className="mini-modal"
+            onSubmit={(event) => {
+              event.preventDefault();
+              submitFilePrompt();
+            }}
+          >
+            <h3>{filePrompt.mode === 'new' ? 'New file' : 'Rename file'}</h3>
+            <p>
+              {filePrompt.mode === 'new'
+                ? 'Relative path inside the project. Folders are created automatically.'
+                : 'Move this file to a new relative path.'}
+            </p>
+            <input
+              autoFocus
+              value={filePrompt.value}
+              onChange={(event) => setFilePrompt({ ...filePrompt, value: event.target.value })}
+              onKeyDown={(event) => {
+                if (event.key === 'Escape') closeFilePrompt();
+              }}
+              aria-label="File path"
+              spellCheck={false}
+            />
+            {fileError && <span className="form-error">{fileError}</span>}
+            <div className="mini-actions">
+              <button type="button" className="ghost-btn" onClick={closeFilePrompt}>
+                Cancel
+              </button>
+              <button type="submit" className="primary-btn">
+                {filePrompt.mode === 'new' ? 'Create file' : 'Rename'}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {toast && (
+        <div className="toast" role="status">
+          <Icon name="check" size={15} />
+          <span>{toast}</span>
+        </div>
+      )}
     </div>
   );
 }

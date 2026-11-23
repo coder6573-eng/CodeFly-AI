@@ -58,8 +58,15 @@ export function friendlyError(error: unknown): string {
 
 async function requestJson(
   url: string,
-  init: { method?: string; headers?: Record<string, string>; body?: string | null },
+  init: {
+    method?: string;
+    headers?: Record<string, string>;
+    body?: string | null;
+    signal?: AbortSignal;
+  },
 ): Promise<unknown> {
+  if (init.signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+
   const bridge = typeof window !== 'undefined' ? window.codefly : undefined;
   let status = 0;
   let text = '';
@@ -71,6 +78,7 @@ async function requestJson(
       headers: init.headers ?? {},
       body: init.body ?? null,
     });
+    if (init.signal?.aborted) throw new DOMException('Aborted', 'AbortError');
     status = response.status;
     text = response.bodyText;
   } else {
@@ -80,8 +88,10 @@ async function requestJson(
         method: init.method ?? 'GET',
         headers: init.headers,
         body: init.body ?? undefined,
+        signal: init.signal,
       });
     } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') throw error;
       throw new ProviderError(
         'Network request failed. The provider may be blocking browser requests (CORS) or you are offline.',
         0,
@@ -133,40 +143,6 @@ function flattenContent(content: unknown): string {
   return '';
 }
 
-interface RawMessage {
-  content?: unknown;
-  tool_calls?: unknown;
-  reasoning_content?: unknown;
-  reasoning?: unknown;
-  thinking?: unknown;
-  analysis?: unknown;
-}
-
-/** Providers name reasoning differently; accept the common shapes. */
-function flattenReasoning(message: RawMessage): string {
-  const candidates = [
-    message.reasoning_content,
-    message.reasoning,
-    message.thinking,
-    message.analysis,
-  ];
-
-  for (const value of candidates) {
-    if (typeof value === 'string' && value.trim()) return value.trim();
-    if (Array.isArray(value)) {
-      const text = flattenContent(value).trim();
-      if (text) return text;
-    }
-    if (value && typeof value === 'object') {
-      const record = value as { text?: unknown; content?: unknown; summary?: unknown };
-      const text = flattenContent(record.text ?? record.content ?? record.summary).trim();
-      if (text) return text;
-    }
-  }
-
-  return '';
-}
-
 function normalizeToolCalls(raw: unknown): ToolCall[] {
   if (!Array.isArray(raw)) return [];
   return raw
@@ -179,12 +155,13 @@ function normalizeToolCalls(raw: unknown): ToolCall[] {
       };
       const name = item.function && item.function.name;
       if (!name) return null;
+      const rawArgs = (item.function as { arguments?: unknown } | undefined)?.arguments;
       return {
         id: item.id || 'call_' + index + '_' + Date.now(),
         type: 'function' as const,
         function: {
           name,
-          arguments: item.function && item.function.arguments ? item.function.arguments : '{}',
+          arguments: typeof rawArgs === 'string' ? rawArgs : JSON.stringify(rawArgs ?? {}),
         },
       };
     })
@@ -203,7 +180,6 @@ export interface ChatOptions {
 
 export interface ChatOutput {
   text: string;
-  reasoning: string;
   model: string;
   toolCalls: ToolCall[];
   finishReason: string;
@@ -232,7 +208,7 @@ export async function chatCompletion(options: ChatOptions): Promise<ChatOutput> 
     model?: string;
     choices?: Array<{
       finish_reason?: string;
-      message?: RawMessage;
+      message?: { content?: unknown; tool_calls?: unknown };
     }>;
   };
 
@@ -241,22 +217,22 @@ export async function chatCompletion(options: ChatOptions): Promise<ChatOutput> 
       method: 'POST',
       headers,
       body: JSON.stringify(body),
+      signal: options.signal,
     })) as typeof data;
   } catch (error) {
     if (error instanceof ProviderError) error.routeId = options.route.id;
     throw error;
   }
 
-  const choice = data.choices && data.choices[0];
-  const message: RawMessage = (choice && choice.message) || {};
+  const choice = (data.choices && data.choices[0]) || {};
+  const message = choice.message || {};
   const text = flattenContent(message.content).trim();
 
   return {
     text,
-    reasoning: flattenReasoning(message),
     model: data.model || options.model,
     toolCalls: normalizeToolCalls(message.tool_calls),
-    finishReason: (choice && choice.finish_reason) || 'stop',
+    finishReason: choice.finish_reason || 'stop',
   };
 }
 

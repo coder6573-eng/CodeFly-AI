@@ -35,5 +35,25 @@ export default defineConfig({
     outDir: 'dist',
     target: 'es2020',
     sourcemap: false,
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (!id.includes('node_modules')) return undefined;
+          if (
+            id.includes('@codemirror/lang-') ||
+            id.includes('@lezer/html') ||
+            id.includes('@lezer/css') ||
+            id.includes('@lezer/javascript')
+          ) {
+            return 'editor-langs';
+          }
+          if (id.includes('@codemirror') || id.includes('@uiw') || id.includes('@lezer')) {
+            return 'editor';
+          }
+          if (id.includes('react')) return 'react';
+          return undefined;
+        },
+      },
+    },
   },
 });

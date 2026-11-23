@@ -3,6 +3,8 @@ name: Build Android APK
 on:
   workflow_dispatch:
   push:
+    branches:
+      - main
     tags:
       - 'v*'
 
@@ -31,6 +33,12 @@ jobs:
 
       - name: Add Android platform
         run: npx cap add android
+
+      - name: Generate brand assets
+        run: node scripts/generate-icons.mjs
+
+      - name: Apply Android icons and splash
+        run: npx --yes @capacitor/assets generate --android
 
       - name: Sync Capacitor
         run: npx cap sync android

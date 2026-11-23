@@ -3,6 +3,8 @@ name: Build Windows EXE
 on:
   workflow_dispatch:
   push:
+    branches:
+      - main
     tags:
       - 'v*'
 
@@ -21,6 +23,9 @@ jobs:
 
       - name: Typecheck and build web bundle
         run: npm run build
+
+      - name: Generate brand assets
+        run: node scripts/generate-icons.mjs
 
       - name: Package Electron app
         run: npx electron-builder --win --publish never

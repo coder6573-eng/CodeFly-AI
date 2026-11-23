@@ -1,4 +1,3 @@
-import JSZip from 'jszip';
 import type { Project } from '../types';
 
 function slug(name: string): string {
@@ -13,6 +12,8 @@ function slug(name: string): string {
 
 /** Download every project file as a ZIP, ready to open with index.html. */
 export async function downloadProjectZip(project: Project): Promise<void> {
+  // Loaded on demand so the ZIP library stays out of the initial bundle.
+  const { default: JSZip } = await import('jszip');
   const zip = new JSZip();
   for (const [path, content] of Object.entries(project.files)) {
     zip.file(path, content);

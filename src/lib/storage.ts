@@ -9,6 +9,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   maxTurns: 16,
   temperature: 0.35,
   autoPreview: true,
+  showThinking: true,
 };
 
 export function uid(): string {
@@ -125,6 +126,8 @@ export function loadSettings(): AppSettings {
       temperature: clampNumber(parsed.temperature, 0, 1, DEFAULT_SETTINGS.temperature),
       autoPreview:
         typeof parsed.autoPreview === 'boolean' ? parsed.autoPreview : DEFAULT_SETTINGS.autoPreview,
+      showThinking:
+        typeof parsed.showThinking === 'boolean' ? parsed.showThinking : DEFAULT_SETTINGS.showThinking,
     };
   } catch {
     return { ...DEFAULT_SETTINGS };

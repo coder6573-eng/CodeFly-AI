@@ -133,6 +133,40 @@ function flattenContent(content: unknown): string {
   return '';
 }
 
+interface RawMessage {
+  content?: unknown;
+  tool_calls?: unknown;
+  reasoning_content?: unknown;
+  reasoning?: unknown;
+  thinking?: unknown;
+  analysis?: unknown;
+}
+
+/** Providers name reasoning differently; accept the common shapes. */
+function flattenReasoning(message: RawMessage): string {
+  const candidates = [
+    message.reasoning_content,
+    message.reasoning,
+    message.thinking,
+    message.analysis,
+  ];
+
+  for (const value of candidates) {
+    if (typeof value === 'string' && value.trim()) return value.trim();
+    if (Array.isArray(value)) {
+      const text = flattenContent(value).trim();
+      if (text) return text;
+    }
+    if (value && typeof value === 'object') {
+      const record = value as { text?: unknown; content?: unknown; summary?: unknown };
+      const text = flattenContent(record.text ?? record.content ?? record.summary).trim();
+      if (text) return text;
+    }
+  }
+
+  return '';
+}
+
 function normalizeToolCalls(raw: unknown): ToolCall[] {
   if (!Array.isArray(raw)) return [];
   return raw
@@ -164,10 +198,12 @@ export interface ChatOptions {
   tools?: unknown[];
   temperature?: number;
   maxTokens?: number;
+  signal?: AbortSignal;
 }
 
 export interface ChatOutput {
   text: string;
+  reasoning: string;
   model: string;
   toolCalls: ToolCall[];
   finishReason: string;
@@ -196,7 +232,7 @@ export async function chatCompletion(options: ChatOptions): Promise<ChatOutput> 
     model?: string;
     choices?: Array<{
       finish_reason?: string;
-      message?: { content?: unknown; tool_calls?: unknown };
+      message?: RawMessage;
     }>;
   };
 
@@ -212,11 +248,12 @@ export async function chatCompletion(options: ChatOptions): Promise<ChatOutput> 
   }
 
   const choice = (data.choices && data.choices[0]) || {};
-  const message = choice.message || {};
+  const message: RawMessage = choice.message || {};
   const text = flattenContent(message.content).trim();
 
   return {
     text,
+    reasoning: flattenReasoning(message),
     model: data.model || options.model,
     toolCalls: normalizeToolCalls(message.tool_calls),
     finishReason: choice.finish_reason || 'stop',

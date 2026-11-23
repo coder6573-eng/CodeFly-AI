@@ -1,4 +1,4 @@
-import { chatCompletion } from '../lib/transport';
+import { chatCompletion, ProviderError } from '../lib/transport';
 import type { AgentEvent, AgentResult, ChatEntry, ChatMessage, RouteConfig } from '../types';
 import { parseAgentReply } from './jsonProtocol';
 import {
@@ -12,6 +12,7 @@ import { AGENT_TOOLS, Workspace, executeTool, type ToolOutcome } from './tools';
 const DEFAULT_MAX_TURNS = 16;
 const MAX_TOOL_CALLS = 80;
 const MAX_TOKENS = 8_000;
+const RETRYABLE_STATUS = new Set([0, 408, 425, 429, 500, 502, 503, 504]);
 
 export class AgentStoppedError extends Error {
   constructor() {
@@ -41,6 +42,10 @@ interface PendingCall {
 
 function throwIfAborted(signal?: AbortSignal): void {
   if (signal?.aborted) throw new AgentStoppedError();
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 /** Only the conversational part of previous runs is replayed; tool traffic is not. */
@@ -124,8 +129,8 @@ function defaultSummary(workspace: Workspace, reason: AgentResult['finishReason'
       : 'No changes were made.';
   }
   const shown = paths.slice(0, 6).join(', ');
-  const extra = paths.length > 6 ? ` and ${paths.length - 6} more` : '';
-  return `Updated ${paths.length} file${paths.length === 1 ? '' : 's'}: ${shown}${extra}.`;
+  const extra = paths.length > 6 ? ' and ' + (paths.length - 6) + ' more' : '';
+  return 'Updated ' + paths.length + ' file' + (paths.length === 1 ? '' : 's') + ': ' + shown + extra + '.';
 }
 
 export async function runAgent(options: RunAgentOptions): Promise<AgentResult> {
@@ -193,16 +198,9 @@ export async function runAgent(options: RunAgentOptions): Promise<AgentResult> {
     }
   };
 
-  emit({ type: 'status', text: 'Preparing workspace' });
-
-  while (turns < maxTurns) {
-    throwIfAborted(options.signal);
-    turns += 1;
-    emit({ type: 'status', text: `Step ${turns} of ${maxTurns} - thinking` });
-
-    shrinkMessages(messages);
-
-    const output = await chatCompletion({
+  /** One retry for transient gateway trouble keeps free lanes usable. */
+  const completeWithRetry = async () => {
+    const request = {
       route,
       model: requestedModel,
       messages,
@@ -210,11 +208,42 @@ export async function runAgent(options: RunAgentOptions): Promise<AgentResult> {
       temperature: options.temperature ?? 0.35,
       maxTokens: MAX_TOKENS,
       signal: options.signal,
-    });
+    };
+
+    try {
+      return await chatCompletion(request);
+    } catch (error) {
+      throwIfAborted(options.signal);
+      const status = error instanceof ProviderError ? error.status : 0;
+      if (!RETRYABLE_STATUS.has(status)) throw error;
+      emit({
+        type: 'status',
+        text: 'Provider busy' + (status ? ' (HTTP ' + status + ')' : '') + ' - retrying once',
+      });
+      await delay(1_500);
+      throwIfAborted(options.signal);
+      return await chatCompletion(request);
+    }
+  };
+
+  emit({ type: 'status', text: 'Preparing workspace' });
+
+  while (turns < maxTurns) {
+    throwIfAborted(options.signal);
+    turns += 1;
+    emit({ type: 'status', text: 'Step ' + turns + ' of ' + maxTurns + ' - thinking' });
+
+    shrinkMessages(messages);
+
+    const output = await completeWithRetry();
 
     if (output.model && output.model !== resolvedModel) {
       resolvedModel = output.model;
       emit({ type: 'model', model: resolvedModel, route: route.id });
+    }
+
+    if (output.reasoning) {
+      emit({ type: 'thinking', text: output.reasoning });
     }
 
     const text = output.text || '';
@@ -268,7 +297,7 @@ export async function runAgent(options: RunAgentOptions): Promise<AgentResult> {
         native = false;
         usedJsonProtocol = true;
       }
-      if (parsed.thought) emit({ type: 'assistant', text: parsed.thought });
+      if (parsed.thought) emit({ type: 'thinking', text: parsed.thought });
       messages.push({ role: 'assistant', content: text });
 
       toolCalls += 1;
@@ -277,7 +306,7 @@ export async function runAgent(options: RunAgentOptions): Promise<AgentResult> {
       emitOutcome(parsed.tool, input, outcome);
       messages.push({
         role: 'user',
-        content: `Observation from ${parsed.tool}:\n${outcome.observation}`,
+        content: 'Observation from ' + parsed.tool + ':\n' + outcome.observation,
       });
 
       if (outcome.finished) {

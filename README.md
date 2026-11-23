@@ -6,6 +6,8 @@ Keyless, cross-platform vibe-coding platform. Describe an app and CodeFly genera
 
 - **Six keyless AI routes** - Kilo Auto, Kilo Free Models, LLM7, Pollinations, OVHcloud and Free.ai
 - **Agent loop** - native tool calling with an automatic JSON-protocol fallback for models without tools
+- **Thinking view** - provider reasoning (reasoning_content / reasoning / thinking) and JSON-protocol thoughts appear in a collapsible Thinking block
+- **Resilient calls** - transient gateway errors (429, 5xx, network) are retried once with a status message
 - **Virtual workspace** - the model can only create, edit, rename, read and delete project files
 - **Live preview** - projects render instantly in a sandboxed iframe; local CSS/JS are inlined automatically
 - **Code editor** - CodeMirror with HTML, CSS, JavaScript and JSON support
@@ -32,11 +34,11 @@ The dev server runs at http://localhost:5173.
 
 ## Architecture
 
-- src/agent/engine.ts - run loop (native tools + JSON fallback, budgets, snapshots)
+- src/agent/engine.ts - run loop (native tools + JSON fallback, budgets, snapshots, retries)
 - src/agent/tools.ts - virtual workspace and tool implementations
 - src/agent/prompts.ts - system prompt and protocol texts
 - src/agent/routes.ts - gateway definitions
-- src/lib/transport.ts - OpenAI-compatible HTTP transport
+- src/lib/transport.ts - OpenAI-compatible HTTP transport with reasoning capture
 - src/App.tsx - app shell, project state and run orchestration
 - src/components/ - chat, workspace (preview + editor), route picker, settings
 - src/lib/preview.ts - self-contained preview document builder
